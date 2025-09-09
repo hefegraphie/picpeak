@@ -5,6 +5,7 @@ services:
       dockerfile: Dockerfile
     container_name: picpeak-backend
     restart: unless-stopped
+    user: "0:0"
     environment:
       - NODE_ENV=${NODE_ENV:-production}
       - PORT=3001
