@@ -297,6 +297,18 @@ const PhotoThumbnail: React.FC<PhotoThumbnailProps> = ({
             }}
           />
           
+          {/* Auswahl-Button */}
+          <button
+            className="absolute top-2 right-2 z-10 bg-white rounded-full p-1 shadow-md"
+            onClick={(e) => {
+              e.stopPropagation(); // Verhindere das Schließen des Lightbox
+              onClick(e); // Dies sollte die photo selection logik aufrufen
+            }}
+            aria-label="Select this photo"
+          >
+            {isSelected ? <Check className="w-5 h-5 text-primary-600" /> : <Star className="w-5 h-5 text-neutral-800" />}
+          </button>
+
           {/* Feedback Indicators */}
           {feedbackEnabled && (photo.has_feedback || photo.average_rating > 0 || photo.comment_count > 0) && (
             <div className="absolute top-2 left-2 flex gap-1 z-10">
