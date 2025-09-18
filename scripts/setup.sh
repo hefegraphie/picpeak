@@ -13,7 +13,7 @@ IFS=$'\n\t'
 # Script configuration
 readonly SCRIPT_VERSION="2.0.0"
 readonly APP_NAME="PicPeak"
-readonly REPO_URL="https://github.com/the-luap/picpeak.git"
+readonly REPO_URL="https://github.com/hefegraphie/picpeak.git"
 readonly NODE_VERSION="20"
 readonly MIN_RAM_DOCKER=2048
 readonly MIN_RAM_NATIVE=1024
