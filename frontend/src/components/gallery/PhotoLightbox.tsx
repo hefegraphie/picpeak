@@ -326,6 +326,27 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
         <X className="w-6 h-6 text-white" />
       </button>
 
+      {/* Secondary Feedback Toggle Button - Top Area */}
+      {feedbackEnabled && !isDesktopFeedback && (
+        <button
+          onClick={() => setShowFeedback(!showFeedback)}
+          className={`absolute top-4 p-3 rounded-full transition-all duration-200 z-30 ${
+            showFeedback 
+              ? 'bg-primary-600 hover:bg-primary-700 text-white' 
+              : 'bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm'
+          } border border-white/20`}
+          aria-label={`${showFeedback ? 'Hide' : 'Show'} feedback panel`}
+          style={{ right: '5rem' }}
+        >
+          <MessageSquare className="w-5 h-5" />
+          {(currentPhoto.comment_count > 0 || likeCount > 0) && (
+            <span className="absolute -top-1 -right-1 bg-red-500 text-white text-xs rounded-full w-4 h-4 flex items-center justify-center font-bold">
+              {currentPhoto.comment_count || likeCount}
+            </span>
+          )}
+        </button>
+      )}
+
       {/* Navigation buttons */}
       <button
         onClick={goToPrevious}
@@ -424,21 +445,29 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
               </div>
             )}
             
-            {/* Feedback button with indicator */}
+            {/* Feedback button with indicator - More prominent */}
             {feedbackEnabled && (
               <button
                 onClick={() => {
                   setShowFeedback(!showFeedback);
                 }}
-                className="relative p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors"
-                aria-label="Toggle feedback"
-                title={`Photo feedback${currentPhoto.comment_count > 0 ? ` (${currentPhoto.comment_count} comments)` : ''}`}
+                className={`relative p-3 rounded-full transition-all duration-200 ${
+                  showFeedback 
+                    ? 'bg-primary-600 hover:bg-primary-700 text-white' 
+                    : 'bg-white/20 hover:bg-white/30 text-white backdrop-blur-sm'
+                } border border-white/20`}
+                aria-label="Toggle feedback panel"
+                title={`${showFeedback ? 'Hide' : 'Show'} photo feedback${currentPhoto.comment_count > 0 ? ` (${currentPhoto.comment_count} comments)` : ''}`}
               >
-                <MessageSquare className="w-5 h-5 text-white" />
-                {(currentPhoto.comment_count > 0 || currentPhoto.average_rating > 0) && (
-                  <span className="absolute -top-1 -right-1 bg-primary-500 text-white text-xs rounded-full w-5 h-5 flex items-center justify-center">
-                    {currentPhoto.comment_count > 0 ? currentPhoto.comment_count : '★'}
+                <MessageSquare className="w-6 h-6" />
+                {(currentPhoto.comment_count > 0 || currentPhoto.average_rating > 0 || likeCount > 0) && (
+                  <span className="absolute -top-2 -right-2 bg-red-500 text-white text-xs rounded-full w-6 h-6 flex items-center justify-center font-bold shadow-lg">
+                    {currentPhoto.comment_count > 0 ? currentPhoto.comment_count : (currentPhoto.average_rating > 0 ? '★' : '♥')}
                   </span>
+                )}
+                {/* Pulsing indicator for new feedback */}
+                {!showFeedback && (currentPhoto.comment_count > 0 || likeCount > 0) && (
+                  <span className="absolute -top-1 -right-1 w-3 h-3 bg-red-400 rounded-full animate-pulse"></span>
                 )}
               </button>
             )}
