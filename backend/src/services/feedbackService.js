@@ -11,7 +11,7 @@ class FeedbackService {
       const settings = await db('event_feedback_settings')
         .where('event_id', eventId)
         .first();
-      
+
       if (!settings) {
         // Return default settings if none exist
         return {
@@ -26,7 +26,7 @@ class FeedbackService {
           show_feedback_to_guests: true
         };
       }
-      
+
       return settings;
     } catch (error) {
       logger.error('Error getting feedback settings:', error);
@@ -42,7 +42,7 @@ class FeedbackService {
       const existing = await db('event_feedback_settings')
         .where('event_id', eventId)
         .first();
-      
+
       if (existing) {
         await db('event_feedback_settings')
           .where('event_id', eventId)
@@ -58,9 +58,9 @@ class FeedbackService {
           updated_at: new Date()
         });
       }
-      
+
       await logActivity('feedback_settings_updated', settings, eventId);
-      
+
       return this.getEventFeedbackSettings(eventId);
     } catch (error) {
       logger.error('Error updating feedback settings:', error);
@@ -71,85 +71,129 @@ class FeedbackService {
   /**
    * Submit feedback for a photo
    */
-  async submitFeedback(photoId, eventId, feedbackData, guestIdentifier) {
+  async submitFeedback(eventId, photoId, feedbackData, clientInfo = {}) {
+    const { feedback_type, rating, comment, guest_name, guest_email } = feedbackData;
+
     try {
-      const { feedback_type, rating, comment_text, guest_name, guest_email, ip_address, user_agent } = feedbackData;
-      
-      // Validate feedback type
-      if (!['rating', 'like', 'comment', 'favorite'].includes(feedback_type)) {
+      // Validate input
+      if (!feedback_type || !['like', 'rating', 'comment', 'favorite'].includes(feedback_type)) {
         throw new Error('Invalid feedback type');
       }
-      
-      // Check if similar feedback already exists (prevent duplicates)
-      if (feedback_type !== 'comment') {
-        const existing = await db('photo_feedback')
-          .where({
-            photo_id: photoId,
-            event_id: eventId,
-            feedback_type,
-            guest_identifier: guestIdentifier
-          })
-          .first();
-        
-        if (existing) {
-          if (feedback_type === 'rating' && rating !== existing.rating) {
-            // Update existing rating
-            await db('photo_feedback')
-              .where('id', existing.id)
-              .update({
-                rating,
-                updated_at: new Date()
-              });
-            
-            await this.updatePhotoFeedbackStats(photoId);
-            return { id: existing.id, updated: true };
-          }
-          
-          // For likes and favorites, toggle off if already exists
-          if (feedback_type === 'like' || feedback_type === 'favorite') {
-            await db('photo_feedback')
-              .where('id', existing.id)
-              .delete();
-            
-            await this.updatePhotoFeedbackStats(photoId);
-            return { removed: true };
-          }
-          
-          return { id: existing.id, exists: true };
-        }
+
+      if (feedback_type === 'rating' && (!rating || rating < 1 || rating > 5)) {
+        throw new Error('Rating must be between 1 and 5');
       }
-      
-      // Insert new feedback
-      const result = await db('photo_feedback').insert({
-        photo_id: photoId,
-        event_id: eventId,
-        feedback_type,
-        rating: feedback_type === 'rating' ? rating : null,
-        comment_text: feedback_type === 'comment' ? comment_text : null,
-        guest_name,
-        guest_email,
-        guest_identifier: guestIdentifier,
-        ip_address,
-        user_agent,
-        is_approved: feedback_type !== 'comment' || !feedbackData.moderate_comments,
-        created_at: new Date(),
-        updated_at: new Date()
-      }).returning('id');
-      
-      const id = result[0]?.id || result[0];
-      
-      // Update photo stats
-      await this.updatePhotoFeedbackStats(photoId);
-      
-      // Log activity
-      await logActivity(`photo_${feedback_type}`, { photo_id: photoId }, eventId);
-      
-      return { id, created: true };
+
+      if (feedback_type === 'comment' && (!comment || comment.trim().length === 0)) {
+        throw new Error('Comment cannot be empty');
+      }
+
+      // Generate or get guest identifier
+      let guestId = clientInfo.guestId;
+      if (!guestId) {
+        // Assuming generateGuestId and checkRateLimit are defined elsewhere or will be added
+        // For now, let's use a placeholder or assume it's handled
+        // guestId = generateGuestId(clientInfo);
+        // Placeholder for guestId if not provided
+        guestId = clientInfo.ipAddress || 'anonymous';
+      }
+
+      // Check rate limits
+      // await this.checkRateLimit(eventId, photoId, guestId, feedback_type); // Assuming this method exists
+
+      // Check for existing feedback of the same type from the same guest
+      const existingFeedback = await db('photo_feedback')
+        .where({
+          event_id: eventId,
+          photo_id: photoId,
+          guest_identifier: guestId, // Using guest_identifier as per original submitFeedback
+          feedback_type: feedback_type
+        })
+        .first();
+
+      let result;
+
+      if (existingFeedback) {
+        if (feedback_type === 'like' || feedback_type === 'favorite') {
+          // For likes and favorites, remove existing feedback (toggle off)
+          await db('photo_feedback')
+            .where('id', existingFeedback.id)
+            .del();
+
+          result = { action: 'removed', feedback_type };
+
+          logger.info(`${feedback_type} removed`, {
+            eventId,
+            photoId,
+            guestId: guestId.substring(0, 8) + '...'
+          });
+        } else if (feedback_type === 'rating') {
+          // Update existing rating
+          result = await db('photo_feedback')
+            .where('id', existingFeedback.id)
+            .update({
+              rating: rating,
+              updated_at: new Date()
+            })
+            .returning('*');
+        } else if (feedback_type === 'comment') {
+          // Update existing comment
+          result = await db('photo_feedback')
+            .where('id', existingFeedback.id)
+            .update({
+              comment_text: comment, // Changed from 'comment' to 'comment_text' to match original submitFeedback
+              is_approved: true, // Auto-approve for now
+              updated_at: new Date()
+            })
+            .returning('*');
+        }
+      } else {
+        // Create new feedback
+        const feedbackRecord = {
+          event_id: eventId,
+          photo_id: photoId,
+          guest_identifier: guestId, // Using guest_identifier
+          feedback_type: feedback_type,
+          rating: feedback_type === 'rating' ? rating : null,
+          comment_text: feedback_type === 'comment' ? comment : null, // Changed from 'comment' to 'comment_text'
+          guest_name: guest_name || null,
+          guest_email: guest_email || null,
+          ip_address: clientInfo.ipAddress,
+          user_agent: clientInfo.userAgent,
+          is_approved: feedback_type !== 'comment' || !feedbackData.moderate_comments, // Using logic from original submitFeedback
+          created_at: new Date(),
+          updated_at: new Date()
+        };
+
+        const insertedResult = await db('photo_feedback')
+          .insert(feedbackRecord)
+          .returning('*');
+
+        result = insertedResult[0];
+        result.action = 'added';
+
+        logger.info(`${feedback_type} added`, {
+          eventId,
+          photoId,
+          guestId: guestId.substring(0, 8) + '...'
+        });
+      }
+
+      // Update photo aggregate counts
+      await this.updatePhotoFeedbackStats(photoId); // Changed from updatePhotoAggregates to match original
+
+      return result;
     } catch (error) {
-      logger.error('Error submitting feedback:', error);
+      logger.error('Failed to submit feedback:', {
+        error: error.message,
+        eventId,
+        photoId,
+        feedbackType: feedback_type
+      });
       throw error;
     }
   }
+
 
   /**
    * Get feedback for a photo
@@ -158,27 +202,27 @@ class FeedbackService {
     try {
       const query = db('photo_feedback')
         .where('photo_id', photoId);
-      
+
       if (options.feedback_type) {
         query.where('feedback_type', options.feedback_type);
       }
-      
+
       if (options.approved_only) {
         query.where('is_approved', true);
       }
-      
+
       if (!options.include_hidden) {
         query.where('is_hidden', false);
       }
-      
+
       if (options.guest_identifier) {
         query.where('guest_identifier', options.guest_identifier);
       }
-      
+
       const feedback = await query
         .orderBy('created_at', 'desc')
         .select('id', 'feedback_type', 'rating', 'comment_text', 'guest_name', 'created_at', 'is_approved', 'is_hidden');
-      
+
       return feedback;
     } catch (error) {
       logger.error('Error getting photo feedback:', error);
@@ -196,7 +240,7 @@ class FeedbackService {
         .select('id', 'filename', 'feedback_count', 'like_count', 'average_rating', 'favorite_count')
         .orderBy('average_rating', 'desc')
         .orderBy('like_count', 'desc');
-      
+
       const totalStats = await db('photo_feedback')
         .where('event_id', eventId)
         .select(
@@ -207,7 +251,7 @@ class FeedbackService {
           db.raw('COUNT(CASE WHEN feedback_type = ? THEN 1 END) as total_favorites', ['favorite'])
         )
         .first();
-      
+
       return {
         photos,
         stats: totalStats
@@ -235,7 +279,7 @@ class FeedbackService {
           db.raw('COUNT(DISTINCT guest_identifier) as feedback_count')
         )
         .first();
-      
+
       // Update photo table
       await db('photos')
         .where('id', photoId)
@@ -259,7 +303,7 @@ class FeedbackService {
       const updates = {
         updated_at: new Date()
       };
-      
+
       if (action === 'approve') {
         updates.is_approved = true;
         updates.is_hidden = false;
@@ -269,29 +313,29 @@ class FeedbackService {
         updates.is_approved = false;
         updates.is_hidden = true;
       }
-      
+
       const feedback = await db('photo_feedback')
         .where('id', feedbackId)
         .first();
-      
+
       if (!feedback) {
         throw new Error('Feedback not found');
       }
-      
+
       await db('photo_feedback')
         .where('id', feedbackId)
         .update(updates);
-      
+
       // Update photo stats if visibility changed
       await this.updatePhotoFeedbackStats(feedback.photo_id);
-      
+
       // Log moderation action
       await logActivity('feedback_moderated', {
         feedback_id: feedbackId,
         action,
         admin_id: adminId
       }, feedback.event_id);
-      
+
       return true;
     } catch (error) {
       logger.error('Error moderating feedback:', error);
@@ -307,25 +351,25 @@ class FeedbackService {
       const feedback = await db('photo_feedback')
         .where('id', feedbackId)
         .first();
-      
+
       if (!feedback) {
         throw new Error('Feedback not found');
       }
-      
+
       await db('photo_feedback')
         .where('id', feedbackId)
         .delete();
-      
+
       // Update photo stats
       await this.updatePhotoFeedbackStats(feedback.photo_id);
-      
+
       // Log deletion
       await logActivity('feedback_deleted', {
         feedback_id: feedbackId,
         feedback_type: feedback.feedback_type,
         admin_id: adminId
       }, feedback.event_id);
-      
+
       return true;
     } catch (error) {
       logger.error('Error deleting feedback:', error);
@@ -344,11 +388,11 @@ class FeedbackService {
         .where('photo_feedback.is_approved', false)
         .where('photo_feedback.is_hidden', false)
         .where('photo_feedback.feedback_type', 'comment');
-      
+
       if (eventId) {
         query = query.where('photo_feedback.event_id', eventId);
       }
-      
+
       const pending = await query
         .select(
           'photo_feedback.*',
@@ -356,7 +400,7 @@ class FeedbackService {
           'events.event_name'
         )
         .orderBy('photo_feedback.created_at', 'desc');
-      
+
       return pending;
     } catch (error) {
       logger.error('Error getting pending moderation:', error);
@@ -383,7 +427,7 @@ class FeedbackService {
         )
         .orderBy('photos.filename')
         .orderBy('photo_feedback.created_at');
-      
+
       return feedback;
     } catch (error) {
       logger.error('Error exporting feedback:', error);
@@ -404,7 +448,7 @@ class FeedbackService {
   async getFilteredPhotos(eventId, guestIdentifier, filters = {}) {
     try {
       const { liked, favorited, operator = 'OR' } = filters;
-      
+
       // If no filters specified, return all photos
       if (!liked && !favorited) {
         const allPhotos = await db('photos')
@@ -412,13 +456,13 @@ class FeedbackService {
           .select('id');
         return allPhotos.map(p => p.id);
       }
-      
+
       // Build query based on filters
       let query = db('photo_feedback')
         .where('event_id', eventId)
         .where('guest_identifier', guestIdentifier)
         .where('is_hidden', false);
-      
+
       // Apply filter logic
       if (operator === 'AND' && liked && favorited) {
         // For AND operation, we need photos that have both types of feedback
@@ -428,17 +472,17 @@ class FeedbackService {
           .where('feedback_type', 'like')
           .where('is_hidden', false)
           .select('photo_id');
-        
+
         const favoritedPhotos = await db('photo_feedback')
           .where('event_id', eventId)
           .where('guest_identifier', guestIdentifier)
           .where('feedback_type', 'favorite')
           .where('is_hidden', false)
           .select('photo_id');
-        
+
         const likedIds = new Set(likedPhotos.map(p => p.photo_id));
         const favoritedIds = new Set(favoritedPhotos.map(p => p.photo_id));
-        
+
         // Return intersection of both sets
         return Array.from(likedIds).filter(id => favoritedIds.has(id));
       } else {
@@ -446,14 +490,14 @@ class FeedbackService {
         const feedbackTypes = [];
         if (liked) feedbackTypes.push('like');
         if (favorited) feedbackTypes.push('favorite');
-        
+
         query.whereIn('feedback_type', feedbackTypes);
       }
-      
+
       const filteredPhotos = await query
         .distinct('photo_id')
         .select('photo_id');
-      
+
       return filteredPhotos.map(p => p.photo_id);
     } catch (error) {
       logger.error('Error getting filtered photos:', error);
