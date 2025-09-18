@@ -146,9 +146,10 @@ const GridPhoto: React.FC<GridPhotoProps> = ({
                         onRequireIdentity('like', photo.id);
                         return;
                       }
-                      // Optimistic UI: mark as liked immediately
+                      // Optimistic UI: toggle like status immediately
                       if (onLikeSuccess) onLikeSuccess();
                       try {
+                        // Send feedback with current like status - backend will toggle
                         await feedbackService.submitFeedback(slug!, String(photo.id), {
                           feedback_type: 'like',
                           guest_name: savedIdentity?.name,
@@ -156,13 +157,13 @@ const GridPhoto: React.FC<GridPhotoProps> = ({
                         });
                       } catch (err) {
                         // Keep optimistic state; a refresh will reconcile
-                        console.warn('Like submit failed, keeping optimistic UI', err);
+                        console.warn('Like toggle failed, keeping optimistic UI', err);
                       }
                       if (onFeedbackChange) onFeedbackChange();
                     }}
-                    aria-label="Like photo"
+                    aria-label={liked ? "Unlike photo" : "Like photo"}
                     aria-pressed={liked}
-                    title="Like"
+                    title={liked ? "Unlike" : "Like"}
                   >
                     <Heart className={`w-5 h-5 ${liked ? 'text-white fill-white' : 'text-neutral-800'}`} />
                   </button>
