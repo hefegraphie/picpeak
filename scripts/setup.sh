@@ -13,7 +13,7 @@ IFS=$'\n\t'
 # Script configuration
 readonly SCRIPT_VERSION="2.0.0"
 readonly APP_NAME="PicPeak"
-readonly REPO_URL="https://github.com/yourusername/wedding-photo-sharing"
+readonly REPO_URL="https://github.com/the-luap/picpeak.git"
 readonly NODE_VERSION="20"
 readonly MIN_RAM_DOCKER=2048
 readonly MIN_RAM_NATIVE=1024
@@ -44,7 +44,6 @@ INSTALL_METHOD=""  # docker or native
 OS_TYPE=""
 OS_VERSION=""
 PACKAGE_MANAGER=""
-ADMIN_PASSWORD=""
 ADMIN_EMAIL="admin@example.com"
 DOMAIN_NAME=""
 SMTP_HOST=""
@@ -60,6 +59,38 @@ UNINSTALL_MODE=false
 ################################################################################
 # Helper Functions
 ################################################################################
+
+# Run a command as the application user, even if sudo is not available
+run_as_user() {
+    local cmd="$*"
+    if [[ "$(id -u)" -ne 0 ]]; then
+        # Already non-root; just run
+        bash -lc "$cmd"
+        return $?
+    fi
+    if command_exists sudo; then
+        sudo -H -u "$NATIVE_APP_USER" bash -lc "$cmd"
+    elif command_exists runuser; then
+        runuser -u "$NATIVE_APP_USER" -- bash -lc "$cmd"
+    else
+        su -s /bin/bash - "$NATIVE_APP_USER" -c "$cmd"
+    fi
+}
+
+# Prompt for admin email interactively (unless provided or unattended)
+prompt_admin_email() {
+    if [[ -n "$ADMIN_EMAIL" ]]; then
+        return
+    fi
+    if [[ "$UNATTENDED" == "true" ]]; then
+        ADMIN_EMAIL="admin@example.com"
+        return
+    fi
+    echo
+    echo "Please enter the admin email address (used for the initial admin account):"
+    read -p "Admin email [admin@example.com]: " ADMIN_EMAIL
+    ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+}
 
 print_banner() {
     echo -e "${PURPLE}"
@@ -110,11 +141,16 @@ generate_jwt_secret() {
 }
 
 get_available_ram_mb() {
-    if command_exists free; then
-        free -m | awk '/^Mem:/{print $2}'
-    else
-        echo "0"
+    # Prefer /proc/meminfo (always available on Linux), fallback to free(1)
+    if [[ -r /proc/meminfo ]]; then
+        awk '/^MemTotal:/ { printf "%d\n", $2/1024 }' /proc/meminfo
+        return
     fi
+    if command_exists free; then
+        free -m | awk '/^Mem:/ {print $2}'
+        return
+    fi
+    echo "0"
 }
 
 get_available_disk_gb() {
@@ -316,7 +352,7 @@ setup_docker_installation() {
     fi
     
     log_step "Creating application directory at $app_dir"
-    mkdir -p "$app_dir"/{storage/events/{active,archived},logs,backup,config}
+    mkdir -p "$app_dir"/{storage/events/{active,archived},logs,backup,config,data,events}
     
     # Clone repository
     log_step "Downloading PicPeak..."
@@ -327,11 +363,20 @@ setup_docker_installation() {
         git clone "$REPO_URL" "$app_dir"
     fi
     
+    # Determine host user for container mapping (PUID/PGID)
+    local host_uid host_gid
+    if [[ -n "${SUDO_USER:-}" ]]; then
+        host_uid=$(id -u "$SUDO_USER" 2>/dev/null || echo 1000)
+        host_gid=$(id -g "$SUDO_USER" 2>/dev/null || echo 1000)
+    else
+        host_uid=$(id -u 2>/dev/null || echo 1000)
+        host_gid=$(id -g 2>/dev/null || echo 1000)
+    fi
+
     # Generate secrets
     local jwt_secret=$(generate_jwt_secret)
     local db_password=$(generate_password)
     local redis_password=$(generate_password)
-    [[ -z "$ADMIN_PASSWORD" ]] && ADMIN_PASSWORD=$(generate_password)
     
     # Create .env file
     log_step "Creating configuration..."
@@ -346,7 +391,10 @@ JWT_SECRET=$jwt_secret
 
 # Admin
 ADMIN_EMAIL=$ADMIN_EMAIL
-ADMIN_PASSWORD=$ADMIN_PASSWORD
+
+# Runtime user mapping for Docker bind mounts
+PUID=$host_uid
+PGID=$host_gid
 
 # Database
 DB_HOST=postgres
@@ -373,7 +421,7 @@ SMTP_FROM=${SMTP_USER:-noreply@localhost}
 
 # URLs
 FRONTEND_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME}
-ADMIN_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME/admin}
+ADMIN_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME}
 
 # Features
 ENABLE_FILE_WATCHER=true
@@ -381,6 +429,9 @@ ENABLE_EXPIRATION_CHECKER=true
 ENABLE_EMAIL_SERVICE=true
 DEFAULT_EXPIRY_DAYS=30
 EOF
+
+    # Ensure bind mounts are writable by mapped user
+    chown -R "$host_uid":"$host_gid" "$app_dir"/storage "$app_dir"/logs "$app_dir"/backup "$app_dir"/data "$app_dir"/events 2>/dev/null || true
     
     # Create docker-compose.yml if it doesn't exist
     if [[ ! -f "$app_dir/docker-compose.yml" ]]; then
@@ -551,29 +602,55 @@ setup_native_installation() {
     
     # Create application directory
     log_step "Creating application directory..."
-    mkdir -p "$NATIVE_APP_DIR"/{backend,events/{active,archived},logs,config}
+    mkdir -p "$NATIVE_APP_DIR"/{app,events/{active,archived},logs,config}
+    chown -R $NATIVE_APP_USER:$NATIVE_APP_USER "$NATIVE_APP_DIR"
     
     # Clone repository
     log_step "Downloading PicPeak..."
-    if [[ -d "$NATIVE_APP_DIR/backend/.git" ]]; then
-        cd "$NATIVE_APP_DIR/backend"
-        git pull
+    if [[ -d "$NATIVE_APP_DIR/app/.git" ]]; then
+        cd "$NATIVE_APP_DIR/app"
+        # Ensure correct remote and update even if history was rewritten
+        run_as_user "git config --global --add safe.directory $NATIVE_APP_DIR/app" || true
+        run_as_user "git remote set-url origin $REPO_URL" || true
+        run_as_user "git fetch --all --prune" || true
+        # Prefer checking out remote main and hard resetting to avoid merge prompts
+        if ! run_as_user "git checkout -B main origin/main"; then
+          run_as_user "git checkout main" || true
+          run_as_user "git reset --hard origin/main"
+        fi
     else
-        git clone "$REPO_URL" "$NATIVE_APP_DIR/backend"
+        run_as_user "git clone $REPO_URL $NATIVE_APP_DIR/app" || {
+            run_as_user "git config --global --add safe.directory $NATIVE_APP_DIR/app"
+            run_as_user "git clone $REPO_URL $NATIVE_APP_DIR/app"
+        }
     fi
     
     # Install dependencies
     log_step "Installing dependencies..."
-    cd "$NATIVE_APP_DIR/backend"
+    # The repository root contains both backend/ and frontend/
+    # Install backend production dependencies
+    cd "$NATIVE_APP_DIR/app/backend"
     npm install --production
+    # Ensure SQLite data directory exists for native installs
+    mkdir -p "$NATIVE_APP_DIR/app/backend/data"
+
+    # Build frontend for native serving
+    log_step "Building frontend..."
+    if [[ -d "$NATIVE_APP_DIR/app/frontend" ]]; then
+      cd "$NATIVE_APP_DIR/app/frontend"
+      # Try ci (faster/clean) then fallback to install
+      run_as_user "npm ci --include=dev" || run_as_user "npm install"
+      run_as_user "npm run build"
+    else
+      log_warn "Frontend directory not found; admin UI will not be served by backend"
+    fi
     
     # Generate secrets
     local jwt_secret=$(generate_jwt_secret)
-    [[ -z "$ADMIN_PASSWORD" ]] && ADMIN_PASSWORD=$(generate_password)
     
     # Create .env file
     log_step "Creating configuration..."
-    cat > "$NATIVE_APP_DIR/backend/.env" <<EOF
+    cat > "$NATIVE_APP_DIR/app/backend/.env" <<EOF
 # PicPeak Native Configuration
 # Generated: $(date)
 
@@ -584,14 +661,14 @@ JWT_SECRET=$jwt_secret
 
 # Admin
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=$ADMIN_PASSWORD
 ADMIN_EMAIL=$ADMIN_EMAIL
 
-# Database
-DATABASE_PATH=$NATIVE_APP_DIR/backend/database.sqlite
+# Database (native uses SQLite by default)
+DATABASE_CLIENT=sqlite3
+DATABASE_PATH=$NATIVE_APP_DIR/app/backend/data/photo_sharing.db
 
-# Storage
-PHOTOS_DIR=$NATIVE_APP_DIR/events
+# Storage root (thumbnails/uploads live under this path)
+STORAGE_PATH=$NATIVE_APP_DIR
 
 # Email
 SMTP_ENABLED=${SMTP_HOST:+true}
@@ -603,7 +680,7 @@ SMTP_FROM=${SMTP_USER:-noreply@localhost}
 
 # URLs
 FRONTEND_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME}
-ADMIN_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME/admin}
+ADMIN_URL=${DOMAIN_NAME:+https://$DOMAIN_NAME}
 
 # Features
 ENABLE_FILE_WATCHER=true
@@ -614,16 +691,20 @@ DEFAULT_EXPIRY_DAYS=30
 # Logging
 LOG_DIR=$NATIVE_APP_DIR/logs
 LOG_LEVEL=info
+
+# Frontend serving (native installs)
+SERVE_FRONTEND=true
+FRONTEND_DIR=$NATIVE_APP_DIR/app/frontend/dist
 EOF
     
     # Set permissions
     chown -R $NATIVE_APP_USER:$NATIVE_APP_USER "$NATIVE_APP_DIR"
-    chmod 600 "$NATIVE_APP_DIR/backend/.env"
+    chmod 600 "$NATIVE_APP_DIR/app/backend/.env"
     
     # Run database migrations
     log_step "Initializing database..."
-    cd "$NATIVE_APP_DIR/backend"
-    sudo -u $NATIVE_APP_USER npm run migrate
+    cd "$NATIVE_APP_DIR/app/backend"
+    run_as_user "npm run migrate"
     
     # Create systemd services
     create_systemd_services
@@ -636,8 +717,15 @@ EOF
     # Start services
     log_step "Starting services..."
     systemctl daemon-reload
-    systemctl enable picpeak-backend picpeak-workers
-    systemctl start picpeak-backend picpeak-workers
+    systemctl enable picpeak-backend
+    # Stop/remove legacy workers service if present
+    if systemctl list-unit-files | grep -q '^picpeak-workers.service'; then
+      systemctl disable picpeak-workers || true
+      systemctl stop picpeak-workers || true
+      rm -f /etc/systemd/system/picpeak-workers.service
+      systemctl daemon-reload
+    fi
+    systemctl start picpeak-backend
     
     log_success "Native installation completed!"
 }
@@ -654,7 +742,7 @@ After=network.target
 [Service]
 Type=simple
 User=$NATIVE_APP_USER
-WorkingDirectory=$NATIVE_APP_DIR/backend
+    WorkingDirectory=$NATIVE_APP_DIR/app/backend
 Environment="NODE_ENV=production"
 ExecStart=/usr/bin/node server.js
 Restart=always
@@ -675,7 +763,7 @@ After=network.target picpeak-backend.service
 [Service]
 Type=simple
 User=$NATIVE_APP_USER
-WorkingDirectory=$NATIVE_APP_DIR/backend
+    WorkingDirectory=$NATIVE_APP_DIR/app/backend
 Environment="NODE_ENV=production"
 ExecStart=/usr/bin/node src/services/workerManager.js
 Restart=always
@@ -845,8 +933,32 @@ print_success_message() {
     echo
     echo "🔐 Admin Credentials:"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "Email:    ${CYAN}$ADMIN_EMAIL${NC}"
-    echo -e "Password: ${CYAN}$ADMIN_PASSWORD${NC}"
+    # Read from ADMIN_CREDENTIALS.txt when available
+    local cred_file email_line pass_line admin_email_val admin_pass_val
+    if [[ "$INSTALL_METHOD" == "docker" ]]; then
+        cred_file="$app_dir/data/ADMIN_CREDENTIALS.txt"
+    else
+        cred_file="$NATIVE_APP_DIR/app/backend/data/ADMIN_CREDENTIALS.txt"
+    fi
+    if [[ -f "$cred_file" ]]; then
+        email_line=$(grep -m1 '^Email:' "$cred_file" || true)
+        pass_line=$(grep -m1 '^Password:' "$cred_file" || true)
+        admin_email_val=${email_line#Email: }
+        admin_pass_val=${pass_line#Password: }
+        if [[ -n "$admin_email_val" ]]; then
+          echo -e "Email:    ${CYAN}$admin_email_val${NC}"
+        else
+          echo -e "Email:    ${CYAN}$ADMIN_EMAIL${NC}"
+        fi
+        if [[ -n "$admin_pass_val" ]]; then
+          echo -e "Password: ${CYAN}$admin_pass_val${NC}"
+        else
+          echo -e "Password: ${YELLOW}(see $cred_file)${NC}"
+        fi
+      else
+        echo -e "Email:    ${CYAN}$ADMIN_EMAIL${NC}"
+        echo -e "Password: ${YELLOW}(credentials file not found)${NC}"
+      fi
     echo
     echo -e "${YELLOW}⚠️  IMPORTANT: Change the admin password on first login!${NC}"
     
@@ -870,16 +982,16 @@ print_success_message() {
         echo "🔧 Service Commands:"
         echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo "View logs:    sudo journalctl -u picpeak-backend -f"
-        echo "Stop:         sudo systemctl stop picpeak-backend picpeak-workers"
-        echo "Start:        sudo systemctl start picpeak-backend picpeak-workers"
+        echo "Stop:         sudo systemctl stop picpeak-backend"
+        echo "Start:        sudo systemctl start picpeak-backend"
         echo "Status:       sudo systemctl status picpeak-backend"
     fi
     
     echo
     echo "📚 Documentation:"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "Setup Guide:  https://github.com/yourusername/wedding-photo-sharing/blob/main/SIMPLE_SETUP.md"
-    echo "Full Docs:    https://github.com/yourusername/wedding-photo-sharing"
+    echo "Setup Guide:  https://github.com/the-luap/picpeak/blob/main/SIMPLE_SETUP.md"
+    echo "Full Docs:    https://github.com/the-luap/picpeak"
     echo
     echo -e "${GREEN}✨ Setup complete! Visit the admin panel to start creating galleries.${NC}"
 }
@@ -890,16 +1002,31 @@ print_success_message() {
 
 update_installation() {
     print_header "Updating PicPeak"
-    
-    # Detect existing installation
-    if [[ -d "$DOCKER_APP_DIR" ]] || [[ -d "/home/${SUDO_USER:-}/picpeak" ]]; then
-        INSTALL_METHOD="docker"
-        update_docker_installation
-    elif [[ -d "$NATIVE_APP_DIR" ]]; then
+
+    # Prefer explicit native install detection first
+    native_detected=false
+    docker_detected=false
+
+    # Native detection: app/backend exists OR systemd unit present
+    if [[ -d "$NATIVE_APP_DIR/app/backend" ]]; then
+        native_detected=true
+    elif command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files | grep -q '^picpeak-backend.service'; then
+        native_detected=true
+    fi
+
+    # Docker detection: docker app dir or user home picpeak dir exists
+    if [[ -d "$DOCKER_APP_DIR" ]] || [[ -n "${SUDO_USER:-}" && -d "/home/${SUDO_USER}/picpeak" ]]; then
+        docker_detected=true
+    fi
+
+    if [[ "$native_detected" == true ]]; then
         INSTALL_METHOD="native"
         update_native_installation
+    elif [[ "$docker_detected" == true ]]; then
+        INSTALL_METHOD="docker"
+        update_docker_installation
     else
-        die "No existing PicPeak installation found"
+        die "No existing PicPeak installation found (native dir $NATIVE_APP_DIR/app/backend or docker dir $DOCKER_APP_DIR not present)"
     fi
 }
 
@@ -932,23 +1059,51 @@ update_native_installation() {
     log_step "Updating native installation..."
     
     # Stop services
-    systemctl stop picpeak-backend picpeak-workers
+    systemctl stop picpeak-backend || true
+    if systemctl list-unit-files | grep -q '^picpeak-workers.service'; then
+      systemctl stop picpeak-workers || true
+    fi
     
     # Backup current configuration
-    cp "$NATIVE_APP_DIR/backend/.env" "$NATIVE_APP_DIR/backend/.env.backup-$(date +%Y%m%d-%H%M%S)"
+    if [[ -f "$NATIVE_APP_DIR/app/backend/.env" ]]; then
+      cp "$NATIVE_APP_DIR/app/backend/.env" "$NATIVE_APP_DIR/app/backend/.env.backup-$(date +%Y%m%d-%H%M%S)"
+    fi
     
     # Pull latest code
-    cd "$NATIVE_APP_DIR/backend"
-    sudo -u $NATIVE_APP_USER git pull
+    cd "$NATIVE_APP_DIR/app"
+    run_as_user "git config --global --add safe.directory $NATIVE_APP_DIR/app" || true
+    run_as_user "git remote set-url origin $REPO_URL" || true
+    run_as_user "git fetch --all --prune"
+    if ! run_as_user "git checkout -B main origin/main"; then
+      run_as_user "git checkout main" || true
+      run_as_user "git reset --hard origin/main"
+    fi
     
-    # Update dependencies
-    sudo -u $NATIVE_APP_USER npm install --production
+    # Update backend dependencies
+    cd "$NATIVE_APP_DIR/app/backend"
+    run_as_user "npm install --production"
     
     # Run migrations
-    sudo -u $NATIVE_APP_USER npm run migrate
+    run_as_user "npm run migrate"
+
+    # Rebuild frontend (ensure admin UI for native installs)
+    if [[ -d "$NATIVE_APP_DIR/app/frontend" ]]; then
+      log_step "Rebuilding frontend..."
+      cd "$NATIVE_APP_DIR/app/frontend"
+      run_as_user "npm ci --include=dev" || run_as_user "npm install"
+      run_as_user "npm run build"
+    fi
+
+    # Ensure env has frontend serving flags
+    if ! grep -q '^SERVE_FRONTEND=' "$NATIVE_APP_DIR/app/backend/.env"; then
+      echo "SERVE_FRONTEND=true" >> "$NATIVE_APP_DIR/app/backend/.env"
+    fi
+    if ! grep -q '^FRONTEND_DIR=' "$NATIVE_APP_DIR/app/backend/.env"; then
+      echo "FRONTEND_DIR=$NATIVE_APP_DIR/app/frontend/dist" >> "$NATIVE_APP_DIR/app/backend/.env"
+    fi
     
     # Restart services
-    systemctl start picpeak-backend picpeak-workers
+    systemctl restart picpeak-backend
     
     log_success "Native installation updated successfully!"
 }
@@ -1042,10 +1197,6 @@ parse_arguments() {
                 ADMIN_EMAIL="$2"
                 shift 2
                 ;;
-            --admin-password)
-                ADMIN_PASSWORD="$2"
-                shift 2
-                ;;
             --smtp-host)
                 SMTP_HOST="$2"
                 shift 2
@@ -1103,7 +1254,6 @@ Options:
   --unattended        Run without prompts
   --domain DOMAIN     Set domain name for HTTPS
   --email EMAIL       Admin email address
-  --admin-password    Admin password (auto-generated if not set)
   --smtp-host HOST    SMTP server hostname
   --smtp-port PORT    SMTP server port
   --smtp-user USER    SMTP username
@@ -1126,7 +1276,7 @@ Examples:
 
   # Fully automated Docker setup
   sudo $0 --docker --unattended --domain photos.example.com \\
-    --email admin@example.com --admin-password SecurePass123 \\
+    --email admin@example.com \\
     --smtp-host smtp.gmail.com --smtp-port 587 \\
     --smtp-user user@gmail.com --smtp-pass app-password \\
     --enable-ssl
@@ -1165,6 +1315,9 @@ main() {
     
     # Check system requirements
     check_system_requirements
+    
+    # Prompt for admin email (design choice: always ask unless provided)
+    prompt_admin_email
     
     # Configure email (optional)
     configure_email

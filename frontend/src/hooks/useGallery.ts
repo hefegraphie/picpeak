@@ -11,9 +11,15 @@ export const useGalleryInfo = (slug: string, token?: string) => {
   });
 };
 
-export const useGalleryPhotos = (slug: string, filter?: 'liked' | 'favorited' | 'all', guestId?: string, enabled: boolean = true) => {
+export const useGalleryPhotos = (
+  slug: string,
+  filter?: 'liked' | 'commented' | 'rated' | 'all',
+  guestId?: string,
+  enabled: boolean = true
+) => {
   return useQuery({
     queryKey: ['gallery-photos', slug, filter, guestId],
+    // Pass guestId so backend can filter per-guest views when needed
     queryFn: () => galleryService.getGalleryPhotos(slug, filter, guestId),
     enabled,
     retry: 1,

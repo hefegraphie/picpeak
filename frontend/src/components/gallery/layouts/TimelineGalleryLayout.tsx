@@ -1,24 +1,35 @@
-import React, { useMemo } from 'react';
-import { Download, Maximize2, Check, Calendar } from 'lucide-react';
+import React, { useMemo, useState } from 'react';
+import { Download, Maximize2, Check, Calendar, Heart, MessageSquare } from 'lucide-react';
 import { format, parseISO, startOfDay, startOfWeek, startOfMonth } from 'date-fns';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { AuthenticatedImage } from '../../common';
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
+import { FeedbackIdentityModal } from '../../gallery/FeedbackIdentityModal';
+import { feedbackService } from '../../../services/feedback.service';
 
 export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   photos,
+  slug,
   onPhotoClick,
+  onOpenPhotoWithFeedback,
   onDownload,
   selectedPhotos = new Set(),
   isSelectionMode = false,
   onPhotoSelect,
-  allowDownloads = true
+  allowDownloads = true,
+  feedbackEnabled = false,
+  feedbackOptions
 }) => {
   const { theme } = useTheme();
+  const [likedIds, setLikedIds] = useState<Set<number>>(new Set());
+  const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<null | { type: 'like'; photoId: number }>(null);
+  const [savedIdentity, setSavedIdentity] = useState<{ name: string; email: string } | null>(null);
   const gallerySettings = theme.gallerySettings || {};
   const grouping = gallerySettings.timelineGrouping || 'day';
   const showDates = gallerySettings.timelineShowDates !== false;
+  const canQuickComment = Boolean(feedbackEnabled && feedbackOptions?.allowComments && onOpenPhotoWithFeedback);
 
   // Group photos by date
   const groupedPhotos = useMemo(() => {
@@ -90,13 +101,7 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                   <div
                     key={photo.id}
                     className="relative group cursor-pointer aspect-square"
-                    onClick={() => {
-                      if (isSelectionMode && onPhotoSelect) {
-                        onPhotoSelect(photo.id);
-                      } else {
-                        onPhotoClick(actualIndex);
-                      }
-                    }}
+                    onClick={() => onPhotoClick(actualIndex)}
                   >
                     <AuthenticatedImage
                       src={photo.thumbnail_url || photo.url}
@@ -137,17 +142,70 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                               <Download className="w-5 h-5 text-neutral-800" />
                             </button>
                           )}
+                          {feedbackOptions?.allowLikes && (
+                            <button
+                              className={`p-2 rounded-full transition-colors ${likedIds.has(photo.id) ? 'bg-red-500/90 hover:bg-red-500' : 'bg-white/90 hover:bg-white'}`}
+                              onClick={async (e) => {
+                                e.stopPropagation();
+                                if (feedbackOptions?.requireNameEmail && !savedIdentity) {
+                                  setPendingAction({ type: 'like', photoId: photo.id });
+                                  setShowIdentityModal(true);
+                                  return;
+                                }
+                                setLikedIds(prev => new Set(prev).add(photo.id));
+                                try {
+                                  await feedbackService.submitFeedback(slug!, String(photo.id), {
+                                    feedback_type: 'like',
+                                    guest_name: savedIdentity?.name,
+                                    guest_email: savedIdentity?.email,
+                                  });
+                                } catch (_) {}
+                              }}
+                              aria-label="Like photo"
+                              aria-pressed={likedIds.has(photo.id)}
+                              title="Like"
+                            >
+                              <Heart className={`w-5 h-5 ${likedIds.has(photo.id) ? 'text-white fill-white' : 'text-neutral-800'}`} />
+                            </button>
+                          )}
+                          {canQuickComment && (
+                            <button
+                              className="p-2 bg-white/90 rounded-full hover:bg-white transition-colors"
+                              onClick={(e) => { e.stopPropagation(); onOpenPhotoWithFeedback?.(actualIndex); }}
+                              aria-label="Comment on photo"
+                              title="Comment"
+                            >
+                              <MessageSquare className="w-5 h-5 text-neutral-800" />
+                            </button>
+                          )}
                         </>
                       )}
                     </div>
 
-                    {isSelectionMode && (
-                      <div className={`absolute top-2 right-2 ${selectedPhotos.has(photo.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
-                        <div className={`w-6 h-6 rounded-full border-2 ${selectedPhotos.has(photo.id) ? 'bg-primary-600 border-primary-600' : 'bg-white/80 border-white'} flex items-center justify-center transition-colors`}>
-                          {selectedPhotos.has(photo.id) && <Check className="w-4 h-4 text-white" />}
-                        </div>
+                    {(photo.like_count > 0 || likedIds.has(photo.id)) && (
+                      <div className={`absolute ${photo.type === 'collage' ? 'bottom-8' : 'bottom-2'} left-2 z-10`}>
+                        <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-white/90 backdrop-blur-sm" title="Liked">
+                          <Heart className="w-3.5 h-3.5 text-red-500" fill="currentColor" />
+                        </span>
                       </div>
                     )}
+
+                    {/* Selection Checkbox (visible on hover or when selected) */}
+                    <button
+                      type="button"
+                      aria-label={`Select ${photo.filename}`}
+                      role="checkbox"
+                      aria-checked={selectedPhotos.has(photo.id)}
+                      data-testid={`gallery-photo-checkbox-${photo.id}`}
+                      className={`absolute top-2 right-2 z-20 transition-opacity ${
+                        selectedPhotos.has(photo.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                      }`}
+                      onClick={(e) => { e.stopPropagation(); onPhotoSelect && onPhotoSelect(photo.id); }}
+                    >
+                      <div className={`w-6 h-6 rounded-full border-2 ${selectedPhotos.has(photo.id) ? 'bg-primary-600 border-primary-600' : 'bg-white/90 border-white'} flex items-center justify-center transition-colors`}>
+                        {selectedPhotos.has(photo.id) && <Check className="w-4 h-4 text-white" />}
+                      </div>
+                    </button>
                   </div>
                 );
               })}
@@ -155,6 +213,23 @@ export const TimelineGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
           </div>
         ))}
       </div>
+      <FeedbackIdentityModal
+        isOpen={showIdentityModal}
+        onClose={() => { setShowIdentityModal(false); setPendingAction(null); }}
+        onSubmit={async (name, email) => {
+          setSavedIdentity({ name, email });
+          setShowIdentityModal(false);
+          if (pendingAction) {
+            await feedbackService.submitFeedback(slug!, String(pendingAction.photoId), {
+              feedback_type: pendingAction.type,
+              guest_name: name,
+              guest_email: email,
+            });
+            setPendingAction(null);
+          }
+        }}
+        feedbackType="like"
+      />
     </div>
   );
 };

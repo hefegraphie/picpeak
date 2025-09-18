@@ -12,6 +12,7 @@ services:
       - JWT_SECRET=${JWT_SECRET}
       - ADMIN_USERNAME=${ADMIN_USERNAME:-admin}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD}
       - DATABASE_CLIENT=pg
       - DATABASE_URL=postgresql://${DB_USER}:${DB_PASSWORD}@postgres:5432/${DB_NAME}
       - DB_TYPE=postgresql
@@ -20,6 +21,7 @@ services:
       - DB_USER=${DB_USER}
       - DB_PASSWORD=${DB_PASSWORD}
       - DB_NAME=${DB_NAME}
+      - EXTERNAL_MEDIA_ROOT=${EXTERNAL_MEDIA_ROOT:-/app/storage/external-media}
       - SMTP_HOST=${SMTP_HOST}
       - SMTP_PORT=${SMTP_PORT}
       - SMTP_SECURE=${SMTP_SECURE:-false}
@@ -30,6 +32,11 @@ services:
       - ADMIN_URL=${ADMIN_URL:-http://localhost:3001}
       - TZ=${TZ:-UTC}
       - STORAGE_PATH=/app/storage
+      # Optional: run container as matching host user to avoid bind mount permission issues
+      - PUID=${PUID:-1001}
+      - PGID=${PGID:-1001}
+    # Use host-matching user ID/GID so bind-mounted folders are writable
+    user: "${PUID:-1001}:${PGID:-1001}"
     volumes:
       - ./events:/app/events
       - ./data:/app/data

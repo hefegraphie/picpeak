@@ -1,10 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import { useDevToolsProtection } from '../../hooks/useDevToolsProtection';
-import { X, ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut, MessageSquare } from 'lucide-react';
+import { X, ChevronLeft, ChevronRight, Download, ZoomIn, ZoomOut, MessageSquare, Heart, Star } from 'lucide-react';
 import type { Photo } from '../../types';
 import { useDownloadPhoto } from '../../hooks/useGallery';
 import { AuthenticatedImage } from '../common';
 import { PhotoFeedback } from './PhotoFeedback';
+import { feedbackService } from '../../services/feedback.service';
+import { FeedbackIdentityModal } from './FeedbackIdentityModal';
 
 interface PhotoLightboxProps {
   photos: Photo[];
@@ -15,6 +17,7 @@ interface PhotoLightboxProps {
   allowDownloads?: boolean;
   protectionLevel?: 'basic' | 'standard' | 'enhanced' | 'maximum';
   useEnhancedProtection?: boolean;
+  initialShowFeedback?: boolean;
 }
 
 export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
@@ -26,6 +29,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   allowDownloads = true,
   protectionLevel = 'standard',
   useEnhancedProtection = false,
+  initialShowFeedback = false,
 }) => {
   const [currentIndex, setCurrentIndex] = useState(initialIndex);
   const [zoom, setZoom] = useState(1);
@@ -33,7 +37,28 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
   const [dragStart, setDragStart] = useState({ x: 0, y: 0 });
   const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
   const [touchDistance, setTouchDistance] = useState<number | null>(null);
-  const [showFeedback, setShowFeedback] = useState(false);
+  const [showFeedback, setShowFeedback] = useState(initialShowFeedback);
+  const [isSmallScreen, setIsSmallScreen] = useState<boolean>(typeof window !== 'undefined' ? window.innerWidth < 640 : false);
+  const [feedbackSettings, setFeedbackSettings] = useState<{
+    feedback_enabled?: boolean;
+    allow_likes?: boolean;
+    allow_ratings?: boolean;
+    require_name_email?: boolean;
+  } | null>(null);
+  const [myLiked, setMyLiked] = useState<boolean>(false);
+  const [myRating, setMyRating] = useState<number>(0);
+  const [likeCount, setLikeCount] = useState<number>(0);
+  const [avgRating, setAvgRating] = useState<number>(0);
+  const [totalRatings, setTotalRatings] = useState<number>(0);
+  const [savedIdentity, setSavedIdentity] = useState<{ name: string; email: string } | null>(null);
+  const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<null | { type: 'like' | 'rating'; rating?: number }>(null);
+
+  useEffect(() => {
+    const onResize = () => setIsSmallScreen(window.innerWidth < 640);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   
   const downloadPhotoMutation = useDownloadPhoto();
   const currentPhoto = photos[currentIndex];
@@ -110,6 +135,81 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
       document.body.classList.remove('protection-maximum', 'protection-enhanced');
     };
   }, [currentIndex]);
+
+  // Load feedback settings once
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const settings = await feedbackService.getGalleryFeedbackSettings(slug);
+        if (mounted) setFeedbackSettings(settings as any);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { mounted = false; };
+  }, [slug]);
+
+  // Load my feedback for the current photo
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        if (!feedbackSettings?.feedback_enabled) return;
+        const data = await feedbackService.getPhotoFeedback(slug, String(currentPhoto.id));
+        if (!mounted) return;
+        setMyLiked(!!data.my_feedback.liked);
+        setMyRating(data.my_feedback.rating || 0);
+        setLikeCount(Number(data.summary?.like_count) || 0);
+        setAvgRating(Number(data.summary?.average_rating) || 0);
+        setTotalRatings(Number(data.summary?.total_ratings) || 0);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => { mounted = false; };
+  }, [slug, currentPhoto.id, feedbackSettings?.feedback_enabled]);
+
+  const submitLike = async () => {
+    const needIdentity = feedbackSettings?.require_name_email && !savedIdentity;
+    if (needIdentity) {
+      setPendingAction({ type: 'like' });
+      setShowIdentityModal(true);
+      return;
+    }
+    await feedbackService.submitFeedback(slug, String(currentPhoto.id), {
+      feedback_type: 'like',
+      guest_name: savedIdentity?.name,
+      guest_email: savedIdentity?.email,
+    });
+    setMyLiked(prev => {
+      const next = !prev;
+      setLikeCount(c => Math.max(0, c + (next ? 1 : -1)));
+      return next;
+    });
+  };
+
+  const submitRating = async (value: number) => {
+    const needIdentity = feedbackSettings?.require_name_email && !savedIdentity;
+    if (needIdentity) {
+      setPendingAction({ type: 'rating', rating: value });
+      setShowIdentityModal(true);
+      return;
+    }
+    await feedbackService.submitFeedback(slug, String(currentPhoto.id), {
+      feedback_type: 'rating',
+      rating: value,
+      guest_name: savedIdentity?.name,
+      guest_email: savedIdentity?.email,
+    });
+    setMyRating(value);
+    // Refresh current summary to reflect average and totals
+    try {
+      const fresh = await feedbackService.getPhotoFeedback(slug, String(currentPhoto.id));
+      setAvgRating(Number(fresh.summary?.average_rating) || 0);
+      setTotalRatings(Number(fresh.summary?.total_ratings) || 0);
+    } catch {}
+  };
 
   const goToPrevious = () => {
     setCurrentIndex((prev) => (prev > 0 ? prev - 1 : photos.length - 1));
@@ -211,13 +311,17 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
     `fixed inset-0 bg-black z-50 flex items-center justify-center protected-image protection-${protectionLevel}` :
     'fixed inset-0 bg-black z-50 flex items-center justify-center';
 
+  const desktopFeedbackWidth = 416; // 26rem; keep in sync with panel width
+  const isDesktopFeedback = showFeedback && !isSmallScreen;
+
   return (
     <div className={lightboxClass}>
       {/* Close button */}
       <button
         onClick={onClose}
-        className="absolute top-4 right-4 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-20"
+        className="absolute top-4 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-30"
         aria-label="Close"
+        style={{ right: isDesktopFeedback ? `${desktopFeedbackWidth + 16}px` : '1rem' }}
       >
         <X className="w-6 h-6 text-white" />
       </button>
@@ -231,16 +335,22 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
         <ChevronLeft className="w-6 h-6 text-white" />
       </button>
 
-      <button
-        onClick={goToNext}
-        className="absolute right-4 top-1/2 -translate-y-1/2 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-20"
-        aria-label="Next photo"
-      >
-        <ChevronRight className="w-6 h-6 text-white" />
-      </button>
+      {!showFeedback || !isSmallScreen ? (
+        <button
+          onClick={goToNext}
+          className="absolute top-1/2 -translate-y-1/2 p-2 bg-white/10 hover:bg-white/20 rounded-full transition-colors z-30"
+          aria-label="Next photo"
+          style={{ right: isDesktopFeedback ? `${desktopFeedbackWidth + 16}px` : '1rem' }}
+        >
+          <ChevronRight className="w-6 h-6 text-white" />
+        </button>
+      ) : null}
 
       {/* Bottom toolbar */}
-      <div className="absolute bottom-0 left-0 right-0 bg-gradient-to-t from-black/80 to-transparent p-4 z-20">
+      <div
+        className="absolute bottom-0 left-0 bg-gradient-to-t from-black/80 to-transparent p-4 z-20"
+        style={{ right: isDesktopFeedback ? `${desktopFeedbackWidth}px` : 0 }}
+      >
         <div className="max-w-4xl mx-auto flex items-center justify-between">
           <div className="text-white">
             <p className="text-sm opacity-75">
@@ -280,6 +390,39 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
                 <Download className="w-5 h-5 text-white" />
               </button>
             )}
+
+            {/* Inline Like */}
+            {feedbackEnabled && feedbackSettings?.allow_likes && (
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={submitLike}
+                  className={`p-2 rounded-full transition-colors ${myLiked ? 'bg-red-500/80 hover:bg-red-500' : 'bg-white/10 hover:bg-white/20'}`}
+                  aria-label={myLiked ? 'Unlike photo' : 'Like photo'}
+                  title={myLiked ? 'Unlike' : 'Like'}
+                >
+                  <Heart className={`w-5 h-5 ${myLiked ? 'text-white' : 'text-white'}`} />
+                </button>
+                <span className="text-white text-xs min-w-[1.5rem] text-center select-none">{likeCount}</span>
+              </div>
+            )}
+
+            {/* Inline Rating */}
+            {feedbackEnabled && feedbackSettings?.allow_ratings && (
+              <div className="flex items-center gap-1 ml-1" aria-label="Rate photo">
+                {[1,2,3,4,5].map((i) => (
+                  <button
+                    key={i}
+                    onClick={() => submitRating(i)}
+                    className="p-1"
+                    aria-label={`Rate ${i} star${i>1?'s':''}`}
+                    title={`Rate ${i}`}
+                  >
+                    <Star className={`w-5 h-5 ${myRating >= i ? 'text-yellow-400 fill-yellow-400' : 'text-white/70'}`} />
+                  </button>
+                ))}
+                <span className="text-white/90 text-xs ml-2 select-none">{avgRating.toFixed(1)} ({totalRatings})</span>
+              </div>
+            )}
             
             {/* Feedback button with indicator */}
             {feedbackEnabled && (
@@ -305,7 +448,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
 
       {/* Image container */}
       <div
-        className="absolute inset-0 flex items-center justify-center z-0"
+        className="absolute top-0 left-0 bottom-0 flex items-center justify-center z-0"
         onClick={handleImageClick}
         onMouseDown={handleMouseDown}
         onMouseMove={handleMouseMove}
@@ -314,11 +457,15 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
         onTouchStart={handleTouchStart}
         onTouchMove={handleTouchMove}
         onTouchEnd={handleTouchEnd}
-        style={{ cursor: zoom > 1 ? (isDragging ? 'grabbing' : 'grab') : 'default' }}
+        style={{
+          cursor: zoom > 1 ? (isDragging ? 'grabbing' : 'grab') : 'default',
+          right: isDesktopFeedback ? `${desktopFeedbackWidth}px` : 0,
+        }}
       >
         <AuthenticatedImage
           src={currentPhoto.url}
           alt={currentPhoto.filename}
+          fallbackSrc={currentPhoto.thumbnail_url || undefined}
           className="max-w-full max-h-full object-contain select-none"
           style={{
             transform: `scale(${zoom}) translate(${dragOffset.x / zoom}px, ${dragOffset.y / zoom}px)`,
@@ -369,7 +516,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
 
       {/* Feedback Panel */}
       {showFeedback && (
-        <div className="absolute right-0 top-0 bottom-0 w-full sm:w-96 lg:w-[28rem] bg-white shadow-xl z-20 overflow-y-auto">
+        <div className="absolute right-0 top-0 bottom-0 w-full sm:w-[26rem] bg-white shadow-xl z-20 overflow-y-auto flex flex-col border-l border-neutral-200">
           <div className="sticky top-0 bg-white border-b px-4 py-3 flex items-center justify-between">
             <h3 className="font-semibold text-neutral-900">Photo Feedback</h3>
             <button
@@ -380,7 +527,7 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
               <X className="w-5 h-5" />
             </button>
           </div>
-          <div className="p-4">
+          <div className="p-4 flex-1 overflow-y-auto">
             <PhotoFeedback
               photoId={currentPhoto.id}
               gallerySlug={slug}
@@ -390,6 +537,34 @@ export const PhotoLightbox: React.FC<PhotoLightboxProps> = ({
           </div>
         </div>
       )}
+
+      {/* Identity Modal for required name/email */}
+      <FeedbackIdentityModal
+        isOpen={showIdentityModal}
+        onClose={() => { setShowIdentityModal(false); setPendingAction(null); }}
+        onSubmit={async (name, email) => {
+          setSavedIdentity({ name, email });
+          setShowIdentityModal(false);
+          if (pendingAction?.type === 'like') {
+            await feedbackService.submitFeedback(slug, String(currentPhoto.id), {
+              feedback_type: 'like',
+              guest_name: name,
+              guest_email: email,
+            });
+            setMyLiked(true);
+          } else if (pendingAction?.type === 'rating' && pendingAction.rating) {
+            await feedbackService.submitFeedback(slug, String(currentPhoto.id), {
+              feedback_type: 'rating',
+              rating: pendingAction.rating,
+              guest_name: name,
+              guest_email: email,
+            });
+            setMyRating(pendingAction.rating);
+          }
+          setPendingAction(null);
+        }}
+        feedbackType={pendingAction?.type === 'rating' ? 'rating' : 'like'}
+      />
     </div>
   );
 };

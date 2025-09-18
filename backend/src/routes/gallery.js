@@ -107,30 +107,39 @@ router.get('/:slug/photos', verifyGalleryAccess, async (req, res) => {
       .select('photos.*')
       .orderBy('photos.uploaded_at', 'desc');
     
-    // Apply filtering if requested
-    if (filter && guest_id) {
-      let filters = {};
-      
-      // Parse filter parameter
-      if (filter === 'liked') {
-        filters.liked = true;
-      } else if (filter === 'favorited') {
-        filters.favorited = true;
-      } else if (filter === 'liked,favorited' || filter === 'favorited,liked') {
-        filters.liked = true;
-        filters.favorited = true;
-        filters.operator = 'OR';
+    // Apply filtering if requested (global, based on aggregate counts)
+    if (filter) {
+      const f = String(filter).toLowerCase();
+      const parts = f.split(',').map(s => s.trim());
+      const include = new Set();
+
+      // Helper to include IDs for a predicate
+      const includeBy = (predicate) => {
+        photos.forEach(p => { if (predicate(p)) include.add(p.id); });
+      };
+
+      if (parts.includes('liked')) {
+        includeBy(p => (p.like_count || 0) > 0);
       }
-      
-      // Get filtered photo IDs
-      const filteredPhotoIds = await feedbackService.getFilteredPhotos(
-        req.event.id,
-        guest_id,
-        filters
-      );
-      
-      // Filter photos to only include those with feedback
-      photos = photos.filter(photo => filteredPhotoIds.includes(photo.id));
+      if (parts.includes('favorited')) {
+        includeBy(p => (p.favorite_count || 0) > 0);
+      }
+      if (parts.includes('rated')) {
+        includeBy(p => (p.average_rating || 0) > 0);
+      }
+      if (parts.includes('commented')) {
+        // Query commented photo IDs
+        const commented = await db('photo_feedback')
+          .where({ event_id: req.event.id, feedback_type: 'comment', is_approved: true, is_hidden: false })
+          .groupBy('photo_id')
+          .select('photo_id');
+        const commentedIds = new Set(commented.map(c => c.photo_id));
+        includeBy(p => commentedIds.has(p.id));
+      }
+
+      if (include.size > 0) {
+        photos = photos.filter(p => include.has(p.id));
+      }
     }
     
     // Then get comment counts separately
@@ -384,6 +393,87 @@ router.get('/:slug/download-all', verifyGalleryAccess, async (req, res) => {
   }
 });
 
+// Download selected photos as ZIP
+router.post('/:slug/download-selected', verifyGalleryAccess, async (req, res) => {
+  try {
+    // Check if downloads are allowed for this event
+    if (req.event.allow_downloads === false) {
+      return res.status(403).json({ error: 'Downloads are disabled for this gallery' });
+    }
+
+    const ids = Array.isArray(req.body?.photo_ids) ? req.body.photo_ids : [];
+    if (!ids.length) {
+      return res.status(400).json({ error: 'photo_ids is required (non-empty array)' });
+    }
+
+    // Clean IDs
+    const photoIds = ids
+      .map((v) => parseInt(v, 10))
+      .filter((v) => Number.isInteger(v))
+      .slice(0, 500);
+
+    if (photoIds.length === 0) {
+      return res.status(400).json({ error: 'No valid photo IDs provided' });
+    }
+
+    // Fetch photos
+    const photos = await db('photos')
+      .where('photos.event_id', req.event.id)
+      .whereIn('photos.id', photoIds)
+      .select('photos.*')
+      .orderBy('photos.uploaded_at', 'desc');
+
+    if (photos.length === 0) {
+      return res.status(404).json({ error: 'No photos found for selected IDs' });
+    }
+
+    const archiveName = `${req.event.slug}-selected.zip`;
+    res.setHeader('Content-Type', 'application/zip');
+    res.setHeader('Content-Disposition', `attachment; filename="${archiveName}"`);
+
+    const archive = archiver('zip', { zlib: { level: 5 } });
+    archive.on('error', (err) => {
+      console.error('Zip error:', err);
+      try { res.status(500).end(); } catch (e) {}
+    });
+    archive.pipe(res);
+
+    const { resolvePhotoFilePath } = require('../services/photoResolver');
+    const fs = require('fs');
+    // Check watermark settings similar to download-all
+    const watermarkSettings = await watermarkService.getWatermarkSettings();
+    for (const photo of photos) {
+      try {
+        const filePath = resolvePhotoFilePath(req.event, photo);
+        if (filePath && fs.existsSync(filePath)) {
+          const name = photo.filename || `photo-${photo.id}.jpg`;
+          if (watermarkSettings && watermarkSettings.enabled) {
+            // Apply watermark like download-all
+            const watermarkedBuffer = await watermarkService.applyWatermark(filePath, watermarkSettings);
+            archive.append(watermarkedBuffer, { name });
+          } else {
+            archive.file(filePath, { name });
+          }
+        }
+      } catch (e) {
+        // skip missing/inaccessible files
+      }
+    }
+
+    await archive.finalize();
+
+    await db('access_logs').insert({
+      event_id: req.event.id,
+      ip_address: req.ip,
+      user_agent: req.headers['user-agent'],
+      action: 'download_selected'
+    });
+  } catch (error) {
+    console.error('Error in download-selected:', error);
+    res.status(500).json({ error: 'Failed to download selected photos' });
+  }
+});
+
 
 // View single photo (with watermark if enabled)
 router.get('/:slug/photo/:photoId', 
@@ -413,18 +503,9 @@ router.get('/:slug/photo/:photoId',
         });
       }
       
-      // Photo path should be in storage/events/active directory
-      // Handle both legacy paths (just slug/filename) and new paths (events/active/slug/filename)
-      const storagePath = getStoragePath();
-      
-      let filePath;
-      if (photo.path.startsWith('events/active/')) {
-        // New format: path already includes events/active/ prefix
-        filePath = path.join(storagePath, photo.path);
-      } else {
-        // Legacy format: path is just slug/filename
-        filePath = path.join(storagePath, 'events/active', photo.path);
-      }
+      // Resolve the absolute file path for this photo, supporting both managed and external reference modes
+      const { resolvePhotoFilePath } = require('../services/photoResolver');
+      const filePath = resolvePhotoFilePath(req.event, photo);
       
       
       // Log access - temporarily disabled for debugging

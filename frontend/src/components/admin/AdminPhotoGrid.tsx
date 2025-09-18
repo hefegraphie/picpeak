@@ -29,7 +29,10 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
     if (e) {
       e.stopPropagation();
     }
-    
+    // Auto-enable selection mode when selecting via checkbox
+    if (!isSelectionMode) {
+      setIsSelectionMode(true);
+    }
     const newSelected = new Set(selectedPhotos);
     if (newSelected.has(photoId)) {
       newSelected.delete(photoId);
@@ -126,7 +129,7 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
             {isSelectionMode ? 'Cancel Selection' : 'Select Photos'}
           </Button>
           
-          {isSelectionMode && (
+          {(isSelectionMode || selectedPhotos.size > 0) && (
             <>
               <Button
                 variant="ghost"
@@ -167,25 +170,32 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
           return (
             <div
               key={photo.id}
+              data-testid={`admin-photo-tile-${photo.id}`}
               className={`relative group cursor-pointer rounded-lg overflow-hidden bg-neutral-100 transition-opacity ${
                 isSelectionMode ? 'ring-2 ring-offset-2 ' + (selectedPhotos.has(photo.id) ? 'ring-primary-500' : 'ring-transparent') : ''
               } ${isDeleting ? 'opacity-50' : ''}`}
-              onClick={() => !isDeleting && (isSelectionMode ? handlePhotoSelect(photo.id) : onPhotoClick(photo, index))}
+              onClick={() => !isDeleting && onPhotoClick(photo, index)}
           >
-            {/* Selection Checkbox */}
-            {isSelectionMode && (
-              <div className="absolute top-2 left-2 z-10">
-                <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
-                  selectedPhotos.has(photo.id) 
-                    ? 'bg-primary-500 border-primary-500' 
-                    : 'bg-white/80 border-neutral-300'
-                }`}>
-                  {selectedPhotos.has(photo.id) && (
-                    <Check className="w-4 h-4 text-white" />
-                  )}
-                </div>
+            {/* Selection Checkbox (top-right) */}
+            <button
+              type="button"
+              aria-label={`Select ${photo.filename}`}
+              role="checkbox"
+              aria-checked={selectedPhotos.has(photo.id)}
+              data-testid={`admin-photo-checkbox-${photo.id}`}
+              className={`absolute top-2 right-2 z-20 transition-opacity ${
+                selectedPhotos.has(photo.id) ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+              }`}
+              onClick={(e) => handlePhotoSelect(photo.id, e)}
+            >
+              <div className={`w-6 h-6 rounded border-2 flex items-center justify-center ${
+                selectedPhotos.has(photo.id)
+                  ? 'bg-primary-600 border-primary-600'
+                  : 'bg-white/90 border-white'
+              }`}>
+                {selectedPhotos.has(photo.id) && <Check className="w-4 h-4 text-white" />}
               </div>
-            )}
+            </button>
 
             {/* Thumbnail */}
             <div className="aspect-square">
@@ -238,28 +248,28 @@ export const AdminPhotoGrid: React.FC<AdminPhotoGridProps> = ({
               </div>
             </div>
 
-            {/* Category Badge */}
+            {/* Category Badge - move to top-left and prevent overlap with select checkbox */}
             {photo.category_name && (
-              <div className="absolute top-2 right-2">
-                <span className="px-2 py-1 text-xs font-medium bg-white/90 text-neutral-700 rounded">
+              <div className="absolute left-2 top-2 pointer-events-none">
+                <span className="px-2 py-1 text-xs font-medium bg-white/90 text-neutral-700 rounded max-w-[70%] whitespace-nowrap overflow-hidden text-ellipsis">
                   {photo.category_name}
                 </span>
               </div>
             )}
             
-            {/* Feedback Indicators */}
+            {/* Feedback Indicators (moved to bottom-right to avoid covering category) */}
             {(photo.comment_count > 0 || photo.average_rating > 0 || photo.like_count > 0) && (
-              <div className="absolute top-2 left-2 flex gap-1 z-10" style={{ left: isSelectionMode ? '40px' : '8px' }}>
-                {photo.comment_count > 0 && (
-                  <div className="bg-white/90 backdrop-blur-sm rounded-full px-2 py-1 flex items-center gap-1" title={`${photo.comment_count} comments`}>
-                    <MessageSquare className="w-3.5 h-3.5 text-primary-600" fill="currentColor" />
-                    <span className="text-xs font-medium text-neutral-700">{photo.comment_count}</span>
-                  </div>
-                )}
+              <div className="absolute bottom-2 right-2 flex items-center gap-1 z-10">
                 {photo.average_rating > 0 && (
                   <div className="bg-white/90 backdrop-blur-sm rounded-full px-2 py-1 flex items-center gap-1" title={`Rating: ${Number(photo.average_rating).toFixed(1)}`}>
                     <Star className="w-3.5 h-3.5 text-yellow-500" fill="currentColor" />
                     <span className="text-xs font-medium text-neutral-700">{Number(photo.average_rating).toFixed(1)}</span>
+                  </div>
+                )}
+                {photo.comment_count > 0 && (
+                  <div className="bg-white/90 backdrop-blur-sm rounded-full px-2 py-1 flex items-center gap-1" title={`${photo.comment_count} comments`}>
+                    <MessageSquare className="w-3.5 h-3.5 text-primary-600" fill="currentColor" />
+                    <span className="text-xs font-medium text-neutral-700">{photo.comment_count}</span>
                   </div>
                 )}
               </div>

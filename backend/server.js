@@ -12,6 +12,7 @@ logger.info('Server starting up', {
   timestamp: new Date().toISOString()
 });
 
+const fs = require('fs');
 const express = require('express');
 const helmet = require('helmet');
 const cors = require('cors');
@@ -42,25 +43,36 @@ const PORT = process.env.PORT || 3000;
 app.set('trust proxy', 'loopback, linklocal, uniquelocal');
 
 // Security middleware with custom CSP
+// In native HTTP installs, do NOT force HTTPS for subresources.
+const enableHsts = process.env.ENABLE_HSTS === 'true';
+const cspDirectives = {
+  defaultSrc: ["'self'"],
+  scriptSrc: ["'self'", "'unsafe-inline'"], // Required for React
+  styleSrc: ["'self'", "'unsafe-inline'", "https:"], // Required for styled components
+  imgSrc: ["'self'", "data:", "https:", "blob:"], // Allow data URLs and external images
+  connectSrc: ["'self'"], // API connections
+  fontSrc: ["'self'", "https:", "data:"], // Web fonts
+  objectSrc: ["'none'"], // Disable plugins
+  mediaSrc: ["'self'"], // Audio/video
+  frameSrc: ["'none'"], // Disable iframes
+};
+// Only upgrade insecure requests when HSTS explicitly enabled (HTTPS deployment)
+if (enableHsts) {
+  // In helmet, an empty array enables the directive
+  cspDirectives.upgradeInsecureRequests = [];
+}
+
 app.use(helmet({
   contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"], // Required for React
-      styleSrc: ["'self'", "'unsafe-inline'", "https:"], // Required for styled components
-      imgSrc: ["'self'", "data:", "https:", "blob:"], // Allow data URLs and external images
-      connectSrc: ["'self'"], // API connections
-      fontSrc: ["'self'", "https:", "data:"], // Web fonts
-      objectSrc: ["'none'"], // Disable plugins
-      mediaSrc: ["'self'"], // Audio/video
-      frameSrc: ["'none'"], // Disable iframes
-    },
+    // Avoid helmet adding defaults like upgrade-insecure-requests when not desired
+    useDefaults: false,
+    directives: cspDirectives,
   },
-  hsts: {
+  hsts: enableHsts ? {
     maxAge: 31536000, // 1 year
     includeSubDomains: true,
     preload: true
-  },
+  } : false,
   permittedCrossDomainPolicies: false,
   referrerPolicy: { policy: "strict-origin-when-cross-origin" }
 }));
@@ -72,14 +84,14 @@ app.use((req, res, next) => {
   next();
 });
 
-// CORS configuration
+// CORS configuration (apply only to API routes)
 const corsOptions = {
   origin: function (origin, callback) {
     const allowedOrigins = [
       process.env.FRONTEND_URL || 'http://localhost:3005',
       process.env.ADMIN_URL || 'http://localhost:3005'
     ];
-    
+
     // In development, also allow localhost origins
     if (process.env.NODE_ENV === 'development') {
       allowedOrigins.push(
@@ -89,18 +101,22 @@ const corsOptions = {
         'http://localhost:3000'  // Direct backend access
       );
     }
-    
-    // Allow requests with no origin (like mobile apps or curl)
+
+    // Allow requests with no origin (like curl) and allow-listed origins
     if (!origin || allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      // Do not error globally; just omit CORS headers on disallowed origins
+      callback(null, false);
     }
   },
   credentials: true
 };
 
-app.use(cors(corsOptions));
+// Only attach CORS to API endpoints, not static assets
+app.use('/api', cors(corsOptions));
+// Handle preflight explicitly for API paths
+app.options('/api/*', cors(corsOptions));
 
 // Initialize rate limiters (they will be created dynamically)
 let generalRateLimiter;
@@ -123,6 +139,22 @@ async function initializeRateLimiters() {
 // Body parsing middleware with increased limits for large uploads
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
+
+// Request logging for API routes (with timestamps)
+const apiRequestLogger = (req, res, next) => {
+  try {
+    const started = Date.now();
+    const ts = new Date().toISOString();
+    logger.info(`[${ts}] ${req.method} ${req.originalUrl}`);
+    res.on('finish', () => {
+      const ms = Date.now() - started;
+      const tsDone = new Date().toISOString();
+      logger.info(`[${tsDone}] ${req.method} ${req.originalUrl} -> ${res.statusCode} (${ms}ms)`);
+    });
+  } catch (_) {}
+  next();
+};
+app.use('/api', apiRequestLogger);
 
 // Maintenance mode middleware - add after body parsing but before routes
 app.use(maintenanceMiddleware);
@@ -218,6 +250,27 @@ app.use('/api/public/settings', require('./src/routes/publicSettings'));
 app.use('/api/public', require('./src/routes/publicCMS'));
 app.use('/api/images', require('./src/routes/protectedImages'));
 app.use('/api/secure-images', secureImagesRoutes);
+
+// Optional: Serve built frontend (native installs)
+try {
+  const serveFrontendEnv = process.env.SERVE_FRONTEND; // 'true' | 'false' | undefined
+  const frontendDir = process.env.FRONTEND_DIR || path.join(__dirname, '../frontend/dist');
+  const indexPath = path.join(frontendDir, 'index.html');
+  // Auto-serve when dist exists unless explicitly disabled
+  const shouldServe = (serveFrontendEnv === 'true') || ((serveFrontendEnv === undefined || serveFrontendEnv === 'auto') && fs.existsSync(indexPath));
+  if (shouldServe) {
+    logger.info(`Serving frontend from ${frontendDir}`);
+    app.use(express.static(frontendDir));
+    // SPA fallback for non-API routes
+    app.get([ '/', '/admin', '/admin/*', '/gallery/*' ], (req, res) => {
+      res.sendFile(indexPath);
+    });
+  } else {
+    logger.info('Frontend static serving disabled or dist not found', { serveFrontendEnv, frontendDir });
+  }
+} catch (e) {
+  logger.warn('Failed to enable frontend static serving', { error: e.message });
+}
 
 // Error handling middleware
 app.use((err, req, res, next) => {

@@ -72,6 +72,14 @@ docker-compose up -d
 # Access at http://localhost:3005
 ```
 
+Note on Docker file permissions (PUID/PGID)
+- When using bind mounts (e.g., `./storage`, `./data`, `./logs`, `./events`), ensure the container user can write to these host folders. The backend runs as a non‑root user by default.
+- Set `PUID` and `PGID` in your `.env` to match your host user’s UID/GID (run `id -u` and `id -g` on the host). Compose maps the container user to these values.
+- Example in `.env`:
+  - `PUID=1000`
+  - `PGID=1000`
+- Without this, creating events, uploads, thumbnails, or logs can fail with “Permission denied”.
+
 ## 📖 Documentation
 
 - 📘 [**Deployment Guide**](DEPLOYMENT_GUIDE.md) - Detailed installation instructions
@@ -201,6 +209,7 @@ These features are currently in beta testing and may have limited functionality 
 | **Gallery Feedback** | Allow guests to like, rate, and comment on photos with admin notifications and moderation | Medium | ✅ Implemented |
 | **Video Support** | Upload and display videos alongside photos in galleries with streaming support | Low | 🔄 Open |
 | **Multiple Administrators** | Support for multiple admin accounts with role-based permissions and activity tracking | Low | 📋 Planned |
+| **Filtering & Export Options** | Add filters to show only rated, liked, or marked photos and export filtered selections for Capture One or Lightroom workflows | Low | 🔄 Open |
 
 **Status Legend:** ✅ Implemented | 🚧 In Progress | 🔄 Open | 📋 Planned
 

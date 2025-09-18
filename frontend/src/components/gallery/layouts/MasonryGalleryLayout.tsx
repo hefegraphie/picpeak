@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Download, Maximize2, Check, MessageSquare, Star, Heart } from 'lucide-react';
 import { useTheme } from '../../../contexts/ThemeContext';
 import { AuthenticatedImage } from '../../common';
+import { FeedbackIdentityModal } from '../../gallery/FeedbackIdentityModal';
+import { feedbackService } from '../../../services/feedback.service';
 import type { BaseGalleryLayoutProps } from './BaseGalleryLayout';
 import type { Photo } from '../../../types';
 
@@ -11,9 +13,17 @@ interface MasonryPhotoProps {
   isSelectionMode: boolean;
   onClick: (e: React.MouseEvent) => void;
   onDownload: (e: React.MouseEvent) => void;
+  onToggleSelect: () => void;
   style?: React.CSSProperties;
   allowDownloads?: boolean;
   feedbackEnabled?: boolean;
+  slug?: string;
+  feedbackOptions?: {
+    allowLikes?: boolean;
+    allowComments?: boolean;
+    requireNameEmail?: boolean;
+  };
+  onQuickComment?: () => void;
 }
 
 const MasonryPhoto: React.FC<MasonryPhotoProps> = ({
@@ -22,11 +32,18 @@ const MasonryPhoto: React.FC<MasonryPhotoProps> = ({
   isSelectionMode,
   onClick,
   onDownload,
+  onToggleSelect,
   style,
   allowDownloads = true,
-  feedbackEnabled = false
+  feedbackEnabled = false,
+  slug,
+  feedbackOptions,
+  onQuickComment
 }) => {
   const [imageHeight, setImageHeight] = useState<number>(200);
+  const [showIdentityModal, setShowIdentityModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<null | { type: 'like'; photoId: number }>(null);
+  const [savedIdentity, setSavedIdentity] = useState<{ name: string; email: string } | null>(null);
 
   // Generate random heights for masonry effect
   useEffect(() => {
@@ -100,17 +117,77 @@ const MasonryPhoto: React.FC<MasonryPhotoProps> = ({
                 <Download className="w-5 h-5 text-neutral-800" />
               </button>
             )}
+            {onQuickComment && (
+              <button
+                className="p-2 bg-white/90 rounded-full hover:bg-white transition-colors"
+                onClick={(e) => { e.stopPropagation(); onQuickComment(); }}
+                aria-label="Comment on photo"
+                title="Comment"
+              >
+                <MessageSquare className="w-5 h-5 text-neutral-800" />
+              </button>
+            )}
+            {feedbackOptions?.allowLikes && (
+              <button
+                className="p-2 bg-white/90 rounded-full hover:bg-white transition-colors"
+                onClick={async (e) => {
+                  e.stopPropagation();
+                  if (feedbackOptions?.requireNameEmail && !savedIdentity) {
+                    setPendingAction({ type: 'like', photoId: photo.id });
+                    setShowIdentityModal(true);
+                    return;
+                  }
+                  await feedbackService.submitFeedback(slug!, String(photo.id), {
+                    feedback_type: 'like',
+                    guest_name: savedIdentity?.name,
+                    guest_email: savedIdentity?.email,
+                  });
+                }}
+                aria-label="Like photo"
+                title="Like"
+              >
+                <Heart className="w-5 h-5 text-neutral-800" />
+              </button>
+            )}
           </>
         )}
       </div>
 
-      {isSelectionMode && (
-        <div className={`absolute top-2 right-2 ${isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'} transition-opacity`}>
-          <div className={`w-6 h-6 rounded-full border-2 ${isSelected ? 'bg-primary-600 border-primary-600' : 'bg-white/80 border-white'} flex items-center justify-center transition-colors`}>
-            {isSelected && <Check className="w-4 h-4 text-white" />}
-          </div>
+      {/* Identity Modal */}
+      <FeedbackIdentityModal
+        isOpen={showIdentityModal}
+        onClose={() => { setShowIdentityModal(false); setPendingAction(null); }}
+        onSubmit={async (name, email) => {
+          setSavedIdentity({ name, email });
+          setShowIdentityModal(false);
+          if (pendingAction) {
+            await feedbackService.submitFeedback(slug!, String(pendingAction.photoId), {
+              feedback_type: pendingAction.type,
+              guest_name: name,
+              guest_email: email,
+            });
+            setPendingAction(null);
+          }
+        }}
+        feedbackType="like"
+      />
+
+      {/* Selection Checkbox (visible on hover or when selected) */}
+      <button
+        type="button"
+        aria-label={`Select ${photo.filename}`}
+        role="checkbox"
+        aria-checked={isSelected}
+        data-testid={`gallery-photo-checkbox-${photo.id}`}
+        className={`absolute top-2 right-2 z-20 transition-opacity ${
+          isSelected ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+        }`}
+        onClick={(e) => { e.stopPropagation(); onToggleSelect(); }}
+      >
+        <div className={`w-6 h-6 rounded-full border-2 ${isSelected ? 'bg-primary-600 border-primary-600' : 'bg-white/90 border-white'} flex items-center justify-center transition-colors`}>
+          {isSelected && <Check className="w-4 h-4 text-white" />}
         </div>
-      )}
+      </button>
 
       {photo.type === 'collage' && (
         <div className="absolute bottom-2 left-2">
@@ -125,13 +202,16 @@ const MasonryPhoto: React.FC<MasonryPhotoProps> = ({
 
 export const MasonryGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
   photos,
+  slug,
   onPhotoClick,
+  onOpenPhotoWithFeedback,
   onDownload,
   selectedPhotos = new Set(),
   isSelectionMode = false,
   onPhotoSelect,
   allowDownloads = true,
-  feedbackEnabled = false
+  feedbackEnabled = false,
+  feedbackOptions
 }) => {
   const { theme } = useTheme();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -182,16 +262,14 @@ export const MasonryGalleryLayout: React.FC<BaseGalleryLayoutProps> = ({
                 photo={photo}
                 isSelected={selectedPhotos.has(photo.id)}
                 isSelectionMode={isSelectionMode}
-                onClick={() => {
-                  if (isSelectionMode && onPhotoSelect) {
-                    onPhotoSelect(photo.id);
-                  } else {
-                    onPhotoClick(originalIndex);
-                  }
-                }}
+                onClick={() => onPhotoClick(originalIndex)}
                 onDownload={(e) => onDownload(photo, e)}
+                onToggleSelect={() => onPhotoSelect && onPhotoSelect(photo.id)}
                 allowDownloads={allowDownloads}
                 feedbackEnabled={feedbackEnabled}
+                slug={slug}
+                feedbackOptions={feedbackOptions}
+                onQuickComment={() => onOpenPhotoWithFeedback && onOpenPhotoWithFeedback(originalIndex)}
               />
             );
           })}
